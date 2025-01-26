@@ -9,6 +9,8 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from tensorboard_callback import TensorboardCallback
+import wandb
+from wandb.integration.sb3 import WandbCallback
 
 def make_env(rank, env_conf, seed=0):
     """
@@ -25,13 +27,23 @@ def make_env(rank, env_conf, seed=0):
                 "user": "v2-default", # choose your own username
                 "env_id": rank, # environment identifier
                 "color": "#447799", # choose your color :)
-                "extra": "", # any extra text you put here will be displayed
+                "extra": "What up gamers it's ya boi", # any extra text you put here will be displayed
             }
         )
         env.reset(seed=(seed + rank))
         return env
     set_random_seed(seed)
     return _init
+
+def find_latest_checkpoint(sess_path):
+    """Find the most recent checkpoint in the session path."""
+    checkpoints = list(Path(sess_path).glob("poke_*.zip"))
+    if not checkpoints:
+        return None
+        
+    # Sort by modification time to get the most recent
+    latest = max(checkpoints, key=lambda p: p.stat().st_mtime)
+    return str(latest.absolute())
 
 if __name__ == "__main__":
 
@@ -49,7 +61,7 @@ if __name__ == "__main__":
     
     print(env_config)
     
-    num_cpu = 64 # Also sets the number of episodes per training iteration
+    num_cpu = 12 # Also sets the number of episodes per training iteration
     env = SubprocVecEnv([make_env(i, env_config) for i in range(num_cpu)])
     
     checkpoint_callback = CheckpointCallback(save_freq=ep_length//2, save_path=sess_path,
@@ -82,15 +94,18 @@ if __name__ == "__main__":
 
     train_steps_batch = ep_length // 64
     
-    if exists(file_name + ".zip"):
-        print("\nloading checkpoint")
-        model = PPO.load(file_name, env=env)
+    # Try to find latest checkpoint
+    latest_checkpoint = find_latest_checkpoint(sess_path)
+    if latest_checkpoint:
+        print(f"\nLoading latest checkpoint: {latest_checkpoint}")
+        model = PPO.load(latest_checkpoint, env=env)
         model.n_steps = train_steps_batch
         model.n_envs = num_cpu
         model.rollout_buffer.buffer_size = train_steps_batch
         model.rollout_buffer.n_envs = num_cpu
         model.rollout_buffer.reset()
     else:
+        print("\nNo checkpoint found, starting fresh training")
         model = PPO("MultiInputPolicy", env, verbose=1, n_steps=train_steps_batch, batch_size=512, n_epochs=1, gamma=0.997, ent_coef=0.01, tensorboard_log=sess_path)
     
     print(model.policy)

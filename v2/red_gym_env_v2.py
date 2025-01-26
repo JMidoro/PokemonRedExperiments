@@ -120,6 +120,17 @@ class RedGymEnv(Env):
         if not config["headless"]:
             self.pyboy.set_emulation_speed(6)
 
+        self.base_pokedex_seen = 0
+        self.base_pokedex_owned = 0
+        self.max_pokedex_seen_rew = 0
+        self.max_pokedex_owned_rew = 0
+
+        self.visited_maps = set()
+        self.last_badge_count = 0
+        self.max_new_maps_rew = 0
+        self.max_new_badges_rew = 0
+        self.last_pokeball_count = 0  # Track the last number of Pokéballs
+
     def reset(self, seed=None, options={}):
         self.seed = seed
         # restart game, skipping credits
@@ -162,6 +173,20 @@ class RedGymEnv(Env):
         self.progress_reward = self.get_game_state_reward()
         self.total_reward = sum([val for _, val in self.progress_reward.items()])
         self.reset_count += 1
+
+        # Get base Pokédex counts
+        self.base_pokedex_seen = self.get_pokedex_seen_count()
+        self.base_pokedex_owned = self.get_pokedex_owned_count()
+        self.max_pokedex_seen_rew = 0
+        self.max_pokedex_owned_rew = 0
+
+        # Reset map and badge tracking
+        self.visited_maps = set()
+        self.last_badge_count = 0
+        self.max_new_maps_rew = 0
+        self.max_new_badges_rew = 0
+        self.last_pokeball_count = self.read_m(0xD16F)  # Initialize last Pokéball count
+
         return self._get_obs(), {}
 
     def init_map_mem(self):
@@ -282,6 +307,7 @@ class RedGymEnv(Env):
                 "badge": self.get_badges(),
                 "event": self.progress_reward["event"],
                 "healr": self.total_healing_rew,
+                "pokeballs": self.get_pokeball_count()  # Add Pokéball count to stats
             }
         )
 
@@ -512,17 +538,25 @@ class RedGymEnv(Env):
         )
 
     def get_game_state_reward(self, print_stats=False):
-        # addresses from https://datacrystal.romhacking.net/wiki/Pok%C3%A9mon_Red/Blue:RAM_map
+        # addresses from https://datacrystal.romhacking.net/wiki/Pok%C3%A9mon_Red_and_Blue:RAM_map
         # https://github.com/pret/pokered/blob/91dc3c9f9c8fd529bb6e8307b58b96efa0bec67e/constants/event_constants.asm
+        
+        # Get Pokédex rewards
+        seen_rew, owned_rew = self.update_max_pokedex_rewards()
+        
         state_scores = {
             "event": self.reward_scale * self.update_max_event_rew() * 4,
             "level": self.reward_scale * self.get_levels_reward(),
             "heal": self.reward_scale * self.total_healing_rew * 30,
-            #"op_lvl": self.reward_scale * self.update_max_op_level() * 0.2,
             "dead": self.reward_scale * self.died_count * -0.1,
-            "badge": self.reward_scale * self.get_badges() * 10,
+            "badge": self.reward_scale * self.get_badges() * 10,  # Base badge progress reward
+            "badge_new": self.reward_scale * self.update_badge_rewards() * 50,  # Big reward for new badges
             "explore": self.reward_scale * self.explore_weight * len(self.seen_coords) * 0.1,
-            "stuck": self.reward_scale * self.get_current_coord_count_reward() * -0.05
+            "explore_maps": self.reward_scale * self.update_map_rewards() * 25,  # Reward for discovering new maps
+            "stuck": self.reward_scale * self.get_current_coord_count_reward() * -0.05,
+            "pokedex_seen": self.reward_scale * seen_rew * 5,
+            "pokedex_owned": self.reward_scale * owned_rew * 10,
+            "pokeballs": self.reward_scale * self.update_pokeball_rewards() * 15  # Significant reward for getting new Pokéballs
         }
 
         return state_scores
@@ -585,3 +619,72 @@ class RedGymEnv(Env):
             return self.essential_map_locations[map_idx]
         else:
             return -1
+
+    def get_pokedex_seen_count(self):
+        """Count the number of Pokémon seen in the Pokédex."""
+        seen_count = 0
+        for addr in range(0xD30A, 0xD31E):
+            seen_count += self.bit_count(self.read_m(addr))
+        return seen_count
+
+    def get_pokedex_owned_count(self):
+        """Count the number of Pokémon owned in the Pokédex."""
+        owned_count = 0
+        for addr in range(0xD31E, 0xD332):
+            owned_count += self.bit_count(self.read_m(addr))
+        return owned_count
+
+    def update_max_pokedex_rewards(self):
+        """Update the maximum rewards for Pokédex completion."""
+        # Calculate current counts minus the base counts from start
+        cur_seen_rew = max(0, self.get_pokedex_seen_count() - self.base_pokedex_seen)
+        cur_owned_rew = max(0, self.get_pokedex_owned_count() - self.base_pokedex_owned)
+        
+        # Update max rewards
+        self.max_pokedex_seen_rew = max(self.max_pokedex_seen_rew, cur_seen_rew)
+        self.max_pokedex_owned_rew = max(self.max_pokedex_owned_rew, cur_owned_rew)
+        
+        return self.max_pokedex_seen_rew, self.max_pokedex_owned_rew
+
+    def update_map_rewards(self):
+        """Update rewards for discovering new maps."""
+        current_map = self.read_m(0xD35E)
+        new_map_discovered = False
+        
+        if current_map not in self.visited_maps:
+            self.visited_maps.add(current_map)
+            new_map_discovered = True
+            
+        # Update max reward based on number of unique maps visited
+        self.max_new_maps_rew = max(self.max_new_maps_rew, len(self.visited_maps))
+        return self.max_new_maps_rew
+
+    def update_badge_rewards(self):
+        """Update rewards for obtaining new gym badges."""
+        current_badges = self.get_badges()
+        new_badges = max(0, current_badges - self.last_badge_count)
+        
+        if new_badges > 0:
+            self.last_badge_count = current_badges
+            self.max_new_badges_rew += new_badges
+            
+        return self.max_new_badges_rew
+
+    def get_pokeball_count(self):
+        """Count the number of Pokéballs in the player's inventory."""
+        total_balls = 0
+        for i in range(20):  # Max 20 item slots
+            item_addr = 0xD31E + (i * 2)
+            item_id = self.read_m(item_addr)
+            if item_id == 4:  # Pokéball item ID
+                return self.read_m(item_addr + 1)
+            elif item_id == 0:  # End of inventory
+                break
+        return total_balls
+
+    def update_pokeball_rewards(self):
+        """Update rewards for obtaining new Pokéballs."""
+        current_balls = self.get_pokeball_count()
+        ball_increase = max(0, current_balls - self.last_pokeball_count)
+        self.last_pokeball_count = current_balls
+        return ball_increase

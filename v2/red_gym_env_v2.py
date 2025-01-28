@@ -130,6 +130,12 @@ class RedGymEnv(Env):
         self.max_new_maps_rew = 0
         self.max_new_badges_rew = 0
         self.last_pokeball_count = 0  # Track the last number of Pokéballs
+        self.last_money = 0  # Track the last amount of money
+
+        # Money addresses in BCD format
+        self.MONEY_ADDRESS_1 = 0xD347  # Most significant byte
+        self.MONEY_ADDRESS_2 = 0xD348  # Middle byte
+        self.MONEY_ADDRESS_3 = 0xD349  # Least significant byte
 
     def reset(self, seed=None, options={}):
         self.seed = seed
@@ -185,7 +191,8 @@ class RedGymEnv(Env):
         self.last_badge_count = 0
         self.max_new_maps_rew = 0
         self.max_new_badges_rew = 0
-        self.last_pokeball_count = self.read_m(0xD16F)  # Initialize last Pokéball count
+        self.last_pokeball_count = self.get_pokeball_count()  # Initialize last Pokéball count
+        self.last_money = self.get_money_balance()  # Initialize last money using new function
 
         return self._get_obs(), {}
 
@@ -251,7 +258,16 @@ class RedGymEnv(Env):
 
         obs = self._get_obs()
 
-        # self.save_and_print_info(step_limit_reached, obs)
+        # Print pokeball and money info with step count
+        current_balls = self.get_pokeball_count()
+        current_money = self.get_money_balance()  # Use new money reading function
+        if self.print_rewards:  # Only print if rewards printing is enabled
+            prog_string = f"step: {self.step_count:6d}"
+            for key, val in self.progress_reward.items():
+                prog_string += f" {key}: {val:5.2f}"
+            prog_string += f" sum: {self.total_reward:5.2f}"
+            prog_string += f" | Pokeballs: {current_balls}, Money: ₽{current_money}"  # Added ₽ symbol
+            print(f"\r{prog_string}", end="", flush=True)
 
         # create a map of all event flags set, with names where possible
         #if step_limit_reached:
@@ -307,7 +323,8 @@ class RedGymEnv(Env):
                 "badge": self.get_badges(),
                 "event": self.progress_reward["event"],
                 "healr": self.total_healing_rew,
-                "pokeballs": self.get_pokeball_count()  # Add Pokéball count to stats
+                "pokeballs": self.get_pokeball_count(),  # Add Pokéball count to stats
+                "money": self.get_money_balance()  # Add money to stats
             }
         )
 
@@ -685,6 +702,30 @@ class RedGymEnv(Env):
     def update_pokeball_rewards(self):
         """Update rewards for obtaining new Pokéballs."""
         current_balls = self.get_pokeball_count()
+        current_money = self.get_money_balance()  # Use new money reading function
+        
         ball_increase = max(0, current_balls - self.last_pokeball_count)
+        money_decrease = self.last_money > current_money if hasattr(self, 'last_money') else False
+        
+        # Only give reward if both conditions are met
+        reward = ball_increase if (ball_increase > 0 and money_decrease) else 0
+        
+        # Update last values
         self.last_pokeball_count = current_balls
-        return ball_increase
+        self.last_money = current_money
+        
+        return reward
+
+    def get_money_balance(self):
+        """Get the player's current money balance by reading all three BCD bytes."""
+        # Read each byte and convert from BCD
+        byte1 = self.read_m(self.MONEY_ADDRESS_1)
+        byte2 = self.read_m(self.MONEY_ADDRESS_2)
+        byte3 = self.read_m(self.MONEY_ADDRESS_3)
+        
+        # Convert BCD to decimal
+        # Each byte in BCD format represents two decimal digits
+        money = ((byte1 >> 4) * 10 + (byte1 & 0xF)) * 10000 + \
+                ((byte2 >> 4) * 10 + (byte2 & 0xF)) * 100 + \
+                ((byte3 >> 4) * 10 + (byte3 & 0xF))
+        return money
